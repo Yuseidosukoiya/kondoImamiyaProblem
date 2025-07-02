@@ -52,6 +52,8 @@ def calc_probabilities(player):
 prob_imamiya = calc_probabilities(players['imamiya'])
 prob_kondo = calc_probabilities(players['kondo'])
 
+#　各結果の関数
+
 # シンプルな1打席のシミュレーション
 def simulate_plate_appearance(prob):
     # 結果のリストとその確率を用意
