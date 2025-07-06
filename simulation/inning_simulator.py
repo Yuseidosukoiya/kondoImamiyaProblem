@@ -30,6 +30,7 @@ class InningSimulator:
         if self.bases['3rd'] is not None:
             self.runs += 1
             self.bases['3rd'] = None
+        # ランナーによる選手差を考慮するか否か
         if self.bases['2nd'] is not None:
             if self.bases['2nd'].name == 'imamiya':
                 self.runs += 1
@@ -39,6 +40,12 @@ class InningSimulator:
                 else:
                     self.runs += 1
             self.bases['2nd'] = None
+        # if self.bases['2nd'] is not None:
+        #     if self.bases['3rd'] is None:
+        #         self.bases['3rd'] = self.bases['2nd']
+        #     else:
+        #         self.runs += 1
+        #     self.bases['2nd'] = None
         if self.bases['1st'] is not None:
             if self.bases['2nd'] is None:
                 self.bases['2nd'] = self.bases['1st']
