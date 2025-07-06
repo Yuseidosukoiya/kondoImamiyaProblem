@@ -11,3 +11,8 @@ class Game:
         for _ in range(self.innings):
             total_runs += self.inning_simulator.simulate_inning()
         return total_runs
+
+    def reset_game(self, team):
+        """チーム（打順）を切り替えて初期化"""
+        self.team = team
+        self.inning_simulator = InningSimulator(team)
