@@ -51,11 +51,12 @@ MAX_A = 3
 MAX_BRANCH = 6
 
 def build_state_index(R):
-    states = list(R)
-    sid_of = {s:i for i,s in enumerate(states)}
+    # ★順序を固定：到達集合をタプル順でソート
+    states = sorted(R)
+    sid_of = {s: i for i, s in enumerate(states)}
     S = len(states)
     side_is_away = np.zeros(S, dtype=np.uint8)  # 表=1, 裏=0
-    for i,(inn,half,outs,bases,bA,bH,rd) in enumerate(states):
+    for i, (inn, half, outs, bases, bA, bH, rd) in enumerate(states):
         side_is_away[i] = 1 if half == 0 else 0
     return states, sid_of, side_is_away
 
@@ -68,17 +69,20 @@ def build_numba_arrays(SW_A, BU_A, ST_A, SW_H, states, sid_of):
 
     for sid, (inn,half,outs,bases,bA,bH,rd) in enumerate(states):
         if outs >= 3:
-            # 半イニング終了 → 次ハーフの開始に1分岐（act=0のみ使用）
+            # 半イニング終了 → 次ハーフ開始（act=0のみ使用）
             ninn, nhalf = next_half(inn, half)
             ns = (ninn, nhalf, 0, 0, bA, bH, rd)
-            if ns in sid_of:
-                next_sid[sid, 0, 0] = sid_of[ns]
-                prob[sid, 0, 0] = 1.0
+            # 次状態は終端ではないはずだが、保険的に判定
+            term2, tv2 = terminal_value(ninn, nhalf, 0, rd)
+            prob[sid, 0, 0] = 1.0
+            if term2:
+                reward[sid, 0, 0] = tv2
+                next_sid[sid, 0, 0] = -1
+            else:
                 reward[sid, 0, 0] = 0.0
-                branch_n[sid, 0] = 1
+                next_sid[sid, 0, 0] = sid_of.get(ns, -1)
+            branch_n[sid, 0] = 1
             continue
-
-        # コールド・終局は value_iteration 内で処理（吸収状態扱い）
 
         if half == 0:
             key = ("A", bA, bases, outs)
@@ -86,37 +90,49 @@ def build_numba_arrays(SW_A, BU_A, ST_A, SW_H, states, sid_of):
             # act=0: swing
             b = 0
             for k, (p, (no, nb, runs)) in enumerate(SW_A.get(key, [])):
+                if p == 0.0: continue
                 nrd = clamp(rd + runs, -MAX_DIFF, MAX_DIFF)
-                ns = (inn, half, no, nb, nbA, bH, nrd)
-                if ns in sid_of:
-                    prob[sid, 0, k] = p
-                    reward[sid, 0, k] = 0.0  # runs は「報酬」ではなく「点差」に効く → 終端で処理するためここは0
-                    next_sid[sid, 0, k] = sid_of[ns]
-                    b += 1
+                term2, tv2 = terminal_value(inn, half, no, nrd)
+                prob[sid, 0, b] = p
+                if term2:
+                    reward[sid, 0, b] = tv2
+                    next_sid[sid, 0, b] = -1
+                else:
+                    reward[sid, 0, b] = 0.0
+                    next_sid[sid, 0, b] = sid_of.get((inn, half, no, nb, nbA, bH, nrd), -1)
+                b += 1
             branch_n[sid, 0] = b
 
             # act=1: bunt
             b = 0
             for k, (p, (no, nb, runs)) in enumerate(BU_A.get(key, [])):
+                if p == 0.0: continue
                 nrd = clamp(rd + runs, -MAX_DIFF, MAX_DIFF)
-                ns = (inn, half, no, nb, nbA, bH, nrd)
-                if ns in sid_of:
-                    prob[sid, 1, k] = p
-                    reward[sid, 1, k] = 0.0
-                    next_sid[sid, 1, k] = sid_of[ns]
-                    b += 1
+                term2, tv2 = terminal_value(inn, half, no, nrd)
+                prob[sid, 1, b] = p
+                if term2:
+                    reward[sid, 1, b] = tv2
+                    next_sid[sid, 1, b] = -1
+                else:
+                    reward[sid, 1, b] = 0.0
+                    next_sid[sid, 1, b] = sid_of.get((inn, half, no, nb, nbA, bH, nrd), -1)
+                b += 1
             branch_n[sid, 1] = b
 
-            # act=2: steal
+            # act=2: steal（打者は消費しない）
             b = 0
             for k, (p, (no, nb, runs)) in enumerate(ST_A.get(key, [])):
+                if p == 0.0: continue
                 nrd = clamp(rd + runs, -MAX_DIFF, MAX_DIFF)
-                ns = (inn, half, no, nb, bA, bH, nrd)
-                if ns in sid_of:
-                    prob[sid, 2, k] = p
-                    reward[sid, 2, k] = 0.0
-                    next_sid[sid, 2, k] = sid_of[ns]
-                    b += 1
+                term2, tv2 = terminal_value(inn, half, no, nrd)
+                prob[sid, 2, b] = p
+                if term2:
+                    reward[sid, 2, b] = tv2
+                    next_sid[sid, 2, b] = -1
+                else:
+                    reward[sid, 2, b] = 0.0
+                    next_sid[sid, 2, b] = sid_of.get((inn, half, no, nb, bA, bH, nrd), -1)
+                b += 1
             branch_n[sid, 2] = b
 
         else:
@@ -124,20 +140,24 @@ def build_numba_arrays(SW_A, BU_A, ST_A, SW_H, states, sid_of):
             nbH = (bH + 1) % 9
             b = 0
             for k, (p, (no, nb, runs)) in enumerate(SW_H.get(key, [])):
+                if p == 0.0: continue
                 nrd = clamp(rd - runs, -MAX_DIFF, MAX_DIFF)
-                ns = (inn, half, no, nb, bA, nbH, nrd)
-                if ns in sid_of:
-                    prob[sid, 0, k] = p
-                    reward[sid, 0, k] = 0.0
-                    next_sid[sid, 0, k] = sid_of[ns]
-                    b += 1
+                term2, tv2 = terminal_value(inn, half, no, nrd)
+                prob[sid, 0, b] = p
+                if term2:
+                    reward[sid, 0, b] = tv2
+                    next_sid[sid, 0, b] = -1
+                else:
+                    reward[sid, 0, b] = 0.0
+                    next_sid[sid, 0, b] = sid_of.get((inn, half, no, nb, bA, nbH, nrd), -1)
+                b += 1
             branch_n[sid, 0] = b
-            # act=1,2 は未使用（0分岐のまま）
+            # act=1,2 は未使用（0のまま）
     return prob, reward, next_sid, branch_n
 
 if njit:
     @njit(cache=True, fastmath=True)
-    def value_iteration_numba(V, prob, next_sid, branch_n, side_is_away,
+    def value_iteration_numba(V, prob, reward, next_sid, branch_n, side_is_away,
                               terminal_mask, terminal_value_arr,
                               start_sid, max_sweeps, tol, alpha, eps_stick):
         S = V.shape[0]
@@ -158,8 +178,7 @@ if njit:
                             bn = branch_n[sid, a]
                             for k in range(bn):
                                 ns = next_sid[sid, a, k]
-                                if ns < 0: continue
-                                q += prob[sid, a, k] * V[ns]
+                                q += prob[sid, a, k] * (reward[sid, a, k] + (0.0 if ns < 0 else V[ns]))
                             if q > best:
                                 best = q
                                 best_a = a
@@ -170,8 +189,7 @@ if njit:
                             bn = branch_n[sid, a_prev]
                             for k in range(bn):
                                 ns = next_sid[sid, a_prev, k]
-                                if ns < 0: continue
-                                q_prev += prob[sid, a_prev, k] * V[ns]
+                                q_prev += prob[sid, a_prev, k] * (reward[sid, a_prev, k] + (0.0 if ns < 0 else V[ns]))
                             if (best - q_prev) < eps_stick:
                                 best = q_prev
                                 best_a = a_prev
@@ -183,8 +201,7 @@ if njit:
                         bn = branch_n[sid, 0]
                         for k in range(bn):
                             ns = next_sid[sid, 0, k]
-                            if ns < 0: continue
-                            q += prob[sid, 0, k] * V[ns]
+                            q += prob[sid, 0, k] * (reward[sid, 0, k] + (0.0 if ns < 0 else V[ns]))
                         newv = q
 
                 old = V[sid]
@@ -210,7 +227,7 @@ def evaluate_winprob_numba(away_names: List[str], home_names: List[str],
 
     # 状態の配列化
     states, sid_of, side_is_away = build_state_index(R)
-    prob, reward_unused, next_sid, branch_n = build_numba_arrays(SW_A, BU_A, ST_A, SW_H, states, sid_of)
+    prob, reward, next_sid, branch_n = build_numba_arrays(SW_A, BU_A, ST_A, SW_H, states, sid_of)
 
     # 終端マスクと終端値を用意
     S = len(states)
@@ -238,7 +255,7 @@ def evaluate_winprob_numba(away_names: List[str], home_names: List[str],
         return evaluate_winprob_fast(away_names, home_names)
 
     # Numba 価値反復
-    wp = value_iteration_numba(V, prob, next_sid, branch_n, side_is_away,
+    wp = value_iteration_numba(V, prob, reward, next_sid, branch_n, side_is_away,
                                terminal_mask, terminal_value_arr,
                                start_sid, MAX_SWEEPS, TOL, ALPHA, EPS_STICK)
     return wp, V  # V は次候補のウォームスタートに使える
@@ -438,6 +455,9 @@ def compile_game_transitions(lineup: List[Player], side_tag: str):
 def terminal_value(inn:int, half:int, outs:int, rd:int) -> Tuple[bool,float]:
     if inn >= COLD_FROM_INNING and abs(rd) >= COLD_DIFF:
         return True, 1.0 if rd>0 else 0.0
+    # 9回表終了時点でホームがリードなら試合終了（裏は省略）
+    if inn == 9 and half == 0 and outs == 3 and rd < 0:
+        return True, 0.0  # ビジター視点の勝率 = 0
     if inn==9 and half==1 and outs==3:
         return True, 1.0 if rd>0 else (0.0 if rd<0 else 0.5)
     return False, 0.0
@@ -491,7 +511,58 @@ def reachable_states(SW_A, BU_A, ST_A, SW_H):
                     seen.add(s2); Q.append(s2)
     return list(seen)
 
+# ===== 全体オーケストレーション =====
+def optimize_lineup_by_winprob(names: List[str], home_ref: List[str], top_k=50, beam=30, iters=150, rand_seeds=20, top_final=10):
+    t0 = time.perf_counter()
+    shortlist = shortlist_by_halfER_beam(names, top_k=top_k, beam=beam, iters=iters, rand_seeds=rand_seeds)
+    t1 = time.perf_counter()
+    print(f"[Time] Stage1 (beam={beam}, iters={iters}, top_k={top_k}): {t1-t0:.3f}s")
+    start = time.time()
 
+    ranked = []
+    V_warm = None
+    for rank,(er,order) in enumerate(shortlist,1):
+        t_s = time.perf_counter()
+        # 置換前
+        # # wp, V_warm = evaluate_winprob_fast(order, home_ref, V_warm=V_warm, log_prefix=f"[Cand {rank:02d}] ")
+        # # 置換後
+        wp, V_warm = evaluate_winprob_numba(order, home_ref, V_warm_np=V_warm, log_prefix=f"[Cand {rank:02d}] ")
+
+        t_e = time.perf_counter()
+        ranked.append((wp, er, order, t_e-t_s))
+        print(f"[Cand {rank:02d}] WP={wp:.6f}  ER_half={er:.6f}  time={t_e-t_s:.2f}s  lineup={order}")
+
+    ranked.sort(reverse=True, key=lambda x:x[0])
+    t2 = time.perf_counter()
+    print(f"[Time] Stage2 (K={len(shortlist)}): {t2-t1:.3f}s")
+    print(f"[Time] Total: {t2-t0:.3f}s")
+    return ranked[:top_final]
+
+# ===== CLI =====
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--topk", type=int, default=50, help="Stage2へ回す候補数（ビーム出力）")
+    parser.add_argument("--beam", type=int, default=30, help="ビーム幅")
+    parser.add_argument("--iters", type=int, default=150, help="ビーム反復回数")
+    parser.add_argument("--randseeds", type=int, default=20, help="ランダム初期解の数")
+    parser.add_argument("--topfinal", type=int, default=10, help="最終表示件数")
+    args = parser.parse_args()
+
+    names = default_lineup[:]     # 最適化対象（この9名の並び替え）
+    home_ref = default_lineup[:]  # 相手（ホーム）はDefault固定（基準）
+
+    result = optimize_lineup_by_winprob(names, home_ref,
+                                        top_k=args.topk, beam=args.beam,
+                                        iters=args.iters, rand_seeds=args.randseeds,
+                                        top_final=args.topfinal)
+
+    print("\n=== Best lineups by Win Probability (visitor vs Default home; steal=paper-like) ===")
+    for i,(wp,er,order,spent) in enumerate(result,1):
+        # 出力のフォーマットを9桁
+        print(f"[{i:2d}] WP={wp:.9f}  ER_half={er:.6f}  time={spent:.2f}s  lineup={order}")
+
+
+# [deprecated]
 # ===== ゲーム価値DP（Rのみ、遷移キャッシュ使用、ウォームスタート） =====
 def evaluate_winprob_fast(away_names: List[str], home_names: List[str], V_warm: Dict=None, log_prefix:str="") -> Tuple[float,Dict]:
     away = [players[n] for n in away_names]
@@ -548,54 +619,3 @@ def evaluate_winprob_fast(away_names: List[str], home_names: List[str], V_warm: 
 
     start = (1,0,0,0,0,0,0)
     return V[start], V  # winprob, warm cache
-
-# ===== 全体オーケストレーション =====
-def optimize_lineup_by_winprob(names: List[str], home_ref: List[str], top_k=50, beam=30, iters=150, rand_seeds=20, top_final=10):
-    t0 = time.perf_counter()
-    shortlist = shortlist_by_halfER_beam(names, top_k=top_k, beam=beam, iters=iters, rand_seeds=rand_seeds)
-    t1 = time.perf_counter()
-    print(f"[Time] Stage1 (beam={beam}, iters={iters}, top_k={top_k}): {t1-t0:.3f}s")
-    start = time.time()
-
-    ranked = []
-    V_warm = None
-    for rank,(er,order) in enumerate(shortlist,1):
-        t_s = time.perf_counter()
-        # 置換前
-        # # wp, V_warm = evaluate_winprob_fast(order, home_ref, V_warm=V_warm, log_prefix=f"[Cand {rank:02d}] ")
-        # # 置換後
-        wp, V_warm = evaluate_winprob_numba(order, home_ref, V_warm_np=V_warm, log_prefix=f"[Cand {rank:02d}] ")
-
-        t_e = time.perf_counter()
-        ranked.append((wp, er, order, t_e-t_s))
-        print(f"[Cand {rank:02d}] WP={wp:.6f}  ER_half={er:.6f}  time={t_e-t_s:.2f}s  lineup={order}")
-
-    ranked.sort(reverse=True, key=lambda x:x[0])
-    t2 = time.perf_counter()
-    print(f"[Time] Stage2 (K={len(shortlist)}): {t2-t1:.3f}s")
-    print(f"[Time] Total: {t2-t0:.3f}s")
-    return ranked[:top_final]
-
-# ===== CLI =====
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--topk", type=int, default=50, help="Stage2へ回す候補数（ビーム出力）")
-    parser.add_argument("--beam", type=int, default=30, help="ビーム幅")
-    parser.add_argument("--iters", type=int, default=150, help="ビーム反復回数")
-    parser.add_argument("--randseeds", type=int, default=20, help="ランダム初期解の数")
-    parser.add_argument("--topfinal", type=int, default=10, help="最終表示件数")
-    args = parser.parse_args()
-
-    names = default_lineup[:]     # 最適化対象（この9名の並び替え）
-    home_ref = default_lineup[:]  # 相手（ホーム）はDefault固定（基準）
-
-    result = optimize_lineup_by_winprob(names, home_ref,
-                                        top_k=args.topk, beam=args.beam,
-                                        iters=args.iters, rand_seeds=args.randseeds,
-                                        top_final=args.topfinal)
-
-    print("\n=== Best lineups by Win Probability (visitor vs Default home; steal=paper-like) ===")
-    for i,(wp,er,order,spent) in enumerate(result,1):
-        # 出力のフォーマットを9桁
-        print(f"[{i:2d}] WP={wp:.9f}  ER_half={er:.6f}  time={spent:.2f}s  lineup={order}")
-
