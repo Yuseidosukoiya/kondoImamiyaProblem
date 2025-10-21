@@ -114,8 +114,41 @@ def hr_transition(bases: int) -> Tuple[int, int]:
     runs = 1 + int(has_runner(bases,1)) + int(has_runner(bases,2)) + int(has_runner(bases,3))
     return 0, runs
 
-def bunt_allowed(bases: int, outs: int) -> bool:
-    return (outs <= 1) and has_runner(bases, 1)
+def bunt_fail_transition(bases: int) -> Tuple[int, int]:
+    # 走者有無
+    r1 = has_runner(bases, 1)
+    r2 = has_runner(bases, 2)
+    r3 = has_runner(bases, 3)
+
+    # 最も本塁に近い走者をアウトにし、他は1つ進める
+    nb = 0
+    if r3:
+        # 三塁走者アウト、二塁→三塁、一塁→二塁
+        if r2:
+            nb = set_runner(nb, 3, True)
+        if r1:
+            nb = set_runner(nb, 2, True)
+    elif r2:
+        # 二塁走者アウト、一塁→二塁
+        if r1:
+            nb = set_runner(nb, 2, True)
+    elif r1:
+        # 一塁走者アウト（他に走者なしなのでそのまま）
+        pass
+
+    # 打者は一塁へ
+    nb = set_runner(nb, 1, True)
+    return nb, 0
+
+def bunt_allowed(bases: int, outs: int, run_diff: int = 0) -> bool:
+    # アウトが1つ以下
+    if outs > 1:
+        return False
+    # 走者がいる
+    if bases == 0:
+        return False
+    # 3点以上リード時は消極策を取らない
+    return run_diff < 3
 
 def steal_allowed(bases: int, outs: int) -> bool:
     return (outs <= 1) and has_runner(bases, 1) and (not has_runner(bases, 2))
@@ -154,9 +187,10 @@ def compile_half_transitions(lineup_players: List[Player]):
                     sac = batter["SAC"]
                     nb_s = set_runner(bases, 1, False)
                     nb_s = set_runner(nb_s, 2, True)
+                    nb_fail, _ = bunt_fail_transition(bases)
                     BU[key] = [
                         (sac, min(outs + 1, 3), nb_s, 0),
-                        (1 - sac, min(outs + 1, 3), bases, 0),
+                        (1 - sac, min(outs + 1, 3), nb_fail, 0),
                     ]
                 else:
                     BU[key] = SW[key]
@@ -282,12 +316,13 @@ def swing_transitions_full(batter: Player, bases: int, outs: int) -> List[Tuple[
     return dist
 
 def bunt_transitions_full(batter: Player, bases: int, outs: int) -> List[Tuple[float, Tuple[int, int, int]]]:
+    nb_fail, runs_fail = bunt_fail_transition(bases)
     sac = batter.get("SAC", 0.0)
     if not (bunt_allowed(bases, outs) and sac > 0):
         return swing_transitions_full(batter, bases, outs)
     nb_s = set_runner(bases, 1, False)
     nb_s = set_runner(nb_s, 2, True)
-    return [(sac, (min(outs + 1, 3), nb_s, 0)), (1 - sac, (min(outs + 1, 3), bases, 0))]
+    return [(sac, (min(outs + 1, 3), nb_s, 0)), (1 - sac, (min(outs + 1, 3), nb_fail, 0))]
 
 def compile_game_transitions(lineup: List[Player], side_tag: str):
     SW, BU, ST = {}, {}, {}
