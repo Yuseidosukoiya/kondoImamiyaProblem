@@ -128,6 +128,30 @@ static pair<int,int> hr_transition(int bases) {
   int runs = 1 + (int)has_runner(bases,1) + (int)has_runner(bases,2) + (int)has_runner(bases,3);
   return {0, runs};
 }
+static pair<int,int> bunt_success_transition(int bases) {
+  bool r1 = has_runner(bases,1);
+  bool r2 = has_runner(bases,2);
+  bool r3 = has_runner(bases,3);
+
+  int runs = 0;
+  int nb = 0;
+
+  // runner on 3rd scores
+  if (r3) {
+    runs += 1;
+  }
+  // runner on 2nd -> 3rd
+  if (r2) {
+    nb = set_runner(nb,3,true);
+  }
+  // runner on 1st -> 2nd
+  if (r1) {
+    nb = set_runner(nb,2,true);
+  }
+
+  // batter is out and does NOT occupy any base
+  return {nb, runs};
+}
 static pair<int,int> bunt_fail_transition(int bases) {
   bool r1 = has_runner(bases,1);
   bool r2 = has_runner(bases,2);
@@ -218,12 +242,13 @@ static void compile_half_transitions(
 
         // bunt
         if (bunt_allowed(bases,outs) && batter.SAC>0){
-          int nb_s = set_runner(bases,1,false);
-          nb_s = set_runner(nb_s,2,true);
+          auto bs = bunt_success_transition(bases);
           auto bf = bunt_fail_transition(bases);
           BU[key] = {
-            {batter.SAC, min(outs+1,3), nb_s, 0},
-            {1.0 - batter.SAC, min(outs+1,3), bf.first, 0}
+            // success: all runners advance 1 base, batter out
+            {batter.SAC,               min(outs+1,3), bs.first, bs.second},
+            // fail: leading runner out, others advance 1, batter to 1st
+            {1.0 - batter.SAC,         min(outs+1,3), bf.first, 0}
           };
         } else {
           BU[key] = SW[key];
@@ -482,16 +507,14 @@ static vector<BranchFull> bunt_transitions_full(const Player& batter, int bases,
     return swing_transitions_full(batter, bases, outs);
   }
 
-  // success: runner on 1st moves to 2nd, batter out → 1st is empty
-  int nb_s = set_runner(bases,1,false);
-  nb_s = set_runner(nb_s,2,true);
-
-  // failure: bunt_fail_transition puts batter on 1st
+  auto bs = bunt_success_transition(bases);
   auto bf = bunt_fail_transition(bases);
 
   vector<BranchFull> dist;
-  dist.push_back({batter.SAC,               min(outs+1,3), nb_s,      0, R1_CLEAR});
-  dist.push_back({1.0 - batter.SAC,         min(outs+1,3), bf.first,  0, R1_SET_BATTER});
+  // success: all runners advance 1 base, batter out → no runner on 1st
+  dist.push_back({batter.SAC,               min(outs+1,3), bs.first,  bs.second, R1_CLEAR});
+  // fail: leading runner out, others advance 1, batter becomes runner on 1st
+  dist.push_back({1.0 - batter.SAC,         min(outs+1,3), bf.first,  0,         R1_SET_BATTER});
   return dist;
 }
 
