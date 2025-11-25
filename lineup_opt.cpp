@@ -310,7 +310,7 @@ static vector<pair<double, vector<string>>> shortlist_by_halfER_beam(
   for (int t=0;t<rand_seeds;++t){
     vector<string> perm = names;
     shuffle(perm.begin(), perm.end(), rng);
-    seeds.push_back(move(perm));
+    seeds.push_back(std::move(perm));
   }
   struct VecHash {
     size_t operator()(const vector<string>& v) const {
@@ -343,10 +343,10 @@ static vector<pair<double, vector<string>>> shortlist_by_halfER_beam(
         swap(neword[i], neword[j]);
         if (!seen.insert(neword).second) continue;
         double er_new = expected_runs_half_fast(neword);
-        cand.push_back({er_new, move(neword)});
+        cand.push_back({er_new, std::move(neword)});
       }
     }
-    for (auto& c: cand) beam_list.push_back(move(c));
+    for (auto& c: cand) beam_list.push_back(std::move(c));
     sort(beam_list.begin(), beam_list.end(), [](auto& a, auto& b){return a.first>b.first;});
     if ((int)beam_list.size()>beam) beam_list.resize(beam);
   }
@@ -624,7 +624,7 @@ evaluate_winprob_fast(const vector<string>& away_names, const vector<string>& ho
   }
 
   State start{1,0,0,0,0,0,0};
-  return {V[start], move(V)};
+  return {V[start], std::move(V)};
 }
 
 // =============================================================================
@@ -654,7 +654,7 @@ static vector<Ranked> optimize_lineup_by_winprob(
 
     Ranked r; r.wp=wp; r.er=item.first; r.t=spent;
     for (int i=0;i<9;++i) r.order[i]=item.second[i];
-    ranked.push_back(move(r));
+    ranked.push_back(std::move(r));
 
     cout << fixed << setprecision(6);
     cout << "[Cand " << setw(2) << setfill('0') << rank << "] "
