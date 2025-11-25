@@ -151,7 +151,7 @@ static bool bunt_allowed(int bases, int outs, int run_diff=0) {
   return (run_diff < 3); // don't bunt if leading by >=3
 }
 static bool steal_allowed(int bases, int outs) {
-  return (outs <= 1) && has_runner(bases,1) && (!has_runner(bases,2));
+  return has_runner(bases,1) && (!has_runner(bases,2));
 }
 
 // =============================================================================
@@ -406,7 +406,7 @@ static pair<int,int> next_half(int inn, int half){
 }
 static pair<bool,double> terminal_value(int inn, int half, int outs, int rd){
   // cold
-  if (inn >= COLD_FROM_INNING && abs(rd) >= COLD_DIFF){
+  if (inn >= COLD_FROM_INNING && half == 1 && abs(rd) >= COLD_DIFF){
     return {true, (rd>0)?1.0:0.0};
   }
   // 9th top end: if home leads, game ends
