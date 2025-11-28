@@ -116,4 +116,3 @@ if __name__ == "__main__":
     print("\n=== Posterior 25% quantile (conservative lower bound) ===")
     for r in posterior_lower_values:
         print(r)
-
