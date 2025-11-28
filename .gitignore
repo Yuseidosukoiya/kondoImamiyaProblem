@@ -1,0 +1,11 @@
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# C++ build artifacts
+lineup_opt_test
+*.o
+
+# Internal files
+_codeql_detected_source_root
