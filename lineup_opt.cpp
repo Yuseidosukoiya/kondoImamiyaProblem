@@ -128,6 +128,30 @@ static pair<int,int> hr_transition(int bases) {
   int runs = 1 + (int)has_runner(bases,1) + (int)has_runner(bases,2) + (int)has_runner(bases,3);
   return {0, runs};
 }
+static pair<int,int> bunt_success_transition(int bases) {
+  bool r1 = has_runner(bases,1);
+  bool r2 = has_runner(bases,2);
+  bool r3 = has_runner(bases,3);
+
+  int runs = 0;
+  int nb = 0;
+
+  // runner on 3rd scores
+  if (r3) {
+    runs += 1;
+  }
+  // runner on 2nd -> 3rd
+  if (r2) {
+    nb = set_runner(nb,3,true);
+  }
+  // runner on 1st -> 2nd
+  if (r1) {
+    nb = set_runner(nb,2,true);
+  }
+
+  // batter is out and does NOT occupy any base
+  return {nb, runs};
+}
 static pair<int,int> bunt_fail_transition(int bases) {
   bool r1 = has_runner(bases,1);
   bool r2 = has_runner(bases,2);
@@ -151,7 +175,7 @@ static bool bunt_allowed(int bases, int outs, int run_diff=0) {
   return (run_diff < 3); // don't bunt if leading by >=3
 }
 static bool steal_allowed(int bases, int outs) {
-  return (outs <= 1) && has_runner(bases,1) && (!has_runner(bases,2));
+  return has_runner(bases,1) && (!has_runner(bases,2));
 }
 
 // =============================================================================
@@ -218,12 +242,13 @@ static void compile_half_transitions(
 
         // bunt
         if (bunt_allowed(bases,outs) && batter.SAC>0){
-          int nb_s = set_runner(bases,1,false);
-          nb_s = set_runner(nb_s,2,true);
+          auto bs = bunt_success_transition(bases);
           auto bf = bunt_fail_transition(bases);
           BU[key] = {
-            {batter.SAC, min(outs+1,3), nb_s, 0},
-            {1.0 - batter.SAC, min(outs+1,3), bf.first, 0}
+            // success: all runners advance 1 base, batter out
+            {batter.SAC,               min(outs+1,3), bs.first, bs.second},
+            // fail: leading runner out, others advance 1, batter to 1st
+            {1.0 - batter.SAC,         min(outs+1,3), bf.first, 0}
           };
         } else {
           BU[key] = SW[key];
@@ -310,7 +335,7 @@ static vector<pair<double, vector<string>>> shortlist_by_halfER_beam(
   for (int t=0;t<rand_seeds;++t){
     vector<string> perm = names;
     shuffle(perm.begin(), perm.end(), rng);
-    seeds.push_back(move(perm));
+    seeds.push_back(std::move(perm));
   }
   struct VecHash {
     size_t operator()(const vector<string>& v) const {
@@ -343,10 +368,10 @@ static vector<pair<double, vector<string>>> shortlist_by_halfER_beam(
         swap(neword[i], neword[j]);
         if (!seen.insert(neword).second) continue;
         double er_new = expected_runs_half_fast(neword);
-        cand.push_back({er_new, move(neword)});
+        cand.push_back({er_new, std::move(neword)});
       }
     }
-    for (auto& c: cand) beam_list.push_back(move(c));
+    for (auto& c: cand) beam_list.push_back(std::move(c));
     sort(beam_list.begin(), beam_list.end(), [](auto& a, auto& b){return a.first>b.first;});
     if ((int)beam_list.size()>beam) beam_list.resize(beam);
   }
@@ -362,13 +387,17 @@ static vector<pair<double, vector<string>>> shortlist_by_halfER_beam(
 // =============================================================================
 struct State {
   int inn, half, outs, bases, bA, bH, rd;
+  // runner on 1st for the batting team
+  // -1: no runner on 1st, 0..8: index in the batting team's lineup array
+  int r1;
   bool operator==(const State& o) const {
-    return inn==o.inn && half==o.half && outs==o.outs && bases==o.bases && bA==o.bA && bH==o.bH && rd==o.rd;
+    return inn==o.inn && half==o.half && outs==o.outs &&
+           bases==o.bases && bA==o.bA && bH==o.bH &&
+           rd==o.rd && r1==o.r1;
   }
 };
 struct StateHash {
   size_t operator()(const State& s) const {
-    // simple mix
     size_t h = s.inn;
     h = h*131 + s.half;
     h = h*131 + s.outs;
@@ -376,18 +405,33 @@ struct StateHash {
     h = h*131 + s.bA;
     h = h*131 + s.bH;
     h = h*131 + (s.rd + 32);
+    h = h*131 + (s.r1 + 2); // shift -1 to positive
     return h;
   }
 };
 
-struct BranchFull { double p; int no; int nb; int runs; };
+
+enum R1Mode {
+  R1_KEEP = 0,        // keep current runner on 1st
+  R1_SET_BATTER = 1,  // set runner on 1st to current batter
+  R1_CLEAR = 2        // clear runner on 1st (no runner)
+};
+
+struct BranchFull {
+  double p;
+  int no;
+  int nb;
+  int runs;
+  int r1_mode; // one of R1Mode
+};
+
 
 static pair<int,int> next_half(int inn, int half){
   return (half==0) ? make_pair(inn, 1) : make_pair(inn+1, 0);
 }
 static pair<bool,double> terminal_value(int inn, int half, int outs, int rd){
   // cold
-  if (inn >= COLD_FROM_INNING && abs(rd) >= COLD_DIFF){
+  if (inn >= COLD_FROM_INNING && half == 1 && abs(rd) >= COLD_DIFF){
     return {true, (rd>0)?1.0:0.0};
   }
   // 9th top end: if home leads, game ends
@@ -418,18 +462,43 @@ struct KeyFullHash {
 
 static vector<BranchFull> swing_transitions_full(const Player& batter, int bases, int outs){
   vector<BranchFull> dist;
-  auto add = [&](double p, int no, int nb, int r){
-    if (p>0) dist.push_back({p, min(no,3), nb, r});
+  auto add = [&](double p, int no, int nb, int r, int r1_mode){
+    if (p>0) dist.push_back({p, min(no,3), nb, r, r1_mode});
   };
-  add(batter.OUT, outs+1, bases, 0);
+
+  // out: runner on 1st stays
+  add(batter.OUT, outs+1, bases, 0, R1_KEEP);
+
+  // walk: old runner on 1st goes to 2nd, batter to 1st
   if (batter.BB>0) {
     auto w = walk_transition(bases);
-    add(batter.BB, outs, w.first, w.second);
+    add(batter.BB, outs, w.first, w.second, R1_SET_BATTER);
   }
-  if (batter._1B>0){ auto tr=single_transition(bases); add(batter._1B, outs, tr.first, tr.second); }
-  if (batter._2B>0){ auto tr=double_transition(bases); add(batter._2B, outs, tr.first, tr.second); }
-  if (batter._3B>0){ auto tr=triple_transition(bases); add(batter._3B, outs, tr.first, tr.second); }
-  if (batter.HR>0){ auto tr=hr_transition(bases); add(batter.HR, outs, tr.first, tr.second); }
+
+  // single: runner on 1st goes to 3rd, batter to 1st
+  if (batter._1B>0){
+    auto tr = single_transition(bases);
+    add(batter._1B, outs, tr.first, tr.second, R1_SET_BATTER);
+  }
+
+  // double: all runners score, batter to 2nd → 1st is empty
+  if (batter._2B>0){
+    auto tr = double_transition(bases);
+    add(batter._2B, outs, tr.first, tr.second, R1_CLEAR);
+  }
+
+  // triple: all runners score, batter to 3rd → 1st is empty
+  if (batter._3B>0){
+    auto tr = triple_transition(bases);
+    add(batter._3B, outs, tr.first, tr.second, R1_CLEAR);
+  }
+
+  // HR: all score, bases empty
+  if (batter.HR>0){
+    auto tr = hr_transition(bases);
+    add(batter.HR, outs, tr.first, tr.second, R1_CLEAR);
+  }
+
   return dist;
 }
 
@@ -437,44 +506,59 @@ static vector<BranchFull> bunt_transitions_full(const Player& batter, int bases,
   if (!(bunt_allowed(bases,outs) && batter.SAC>0)) {
     return swing_transitions_full(batter, bases, outs);
   }
-  int nb_s = set_runner(bases,1,false);
-  nb_s = set_runner(nb_s,2,true);
+
+  auto bs = bunt_success_transition(bases);
   auto bf = bunt_fail_transition(bases);
-  return {
-    {batter.SAC, min(outs+1,3), nb_s, 0},
-    {1.0 - batter.SAC, min(outs+1,3), bf.first, 0}
-  };
+
+  vector<BranchFull> dist;
+  // success: all runners advance 1 base, batter out → no runner on 1st
+  dist.push_back({batter.SAC,               min(outs+1,3), bs.first,  bs.second, R1_CLEAR});
+  // fail: leading runner out, others advance 1, batter becomes runner on 1st
+  dist.push_back({1.0 - batter.SAC,         min(outs+1,3), bf.first,  0,         R1_SET_BATTER});
+  return dist;
 }
 
 struct TransFull {
-  unordered_map<KeyFull, vector<BranchFull>, KeyFullHash> SW, BU, ST;
+  array<Player,9> lineup;
+  unordered_map<KeyFull, vector<BranchFull>, KeyFullHash> SW, BU;
 };
+
+static vector<BranchFull> steal_transitions_full(const TransFull& T, const State& s){
+  vector<BranchFull> dist;
+
+  // steal not allowed or no runner on 1st → no-op
+  if (!steal_allowed(s.bases, s.outs) || s.r1 < 0) {
+    dist.push_back({1.0, s.outs, s.bases, 0, R1_KEEP});
+    return dist;
+  }
+
+  int runner_idx = s.r1;
+  double ps = T.lineup[runner_idx].SB;
+  if (ps <= 0.0) {
+    dist.push_back({1.0, s.outs, s.bases, 0, R1_KEEP});
+    return dist;
+  }
+
+  int nb_s = set_runner(s.bases,1,false);
+  nb_s = set_runner(nb_s,2,true);
+  int nb_f = set_runner(s.bases,1,false);
+
+  dist.push_back({ps,            s.outs,             nb_s, 0, R1_CLEAR});
+  dist.push_back({1.0 - ps,      min(s.outs+1,3),    nb_f, 0, R1_CLEAR});
+
+  return dist;
+}
 
 static TransFull compile_game_transitions(const array<Player,9>& lineup){
   TransFull T;
+  T.lineup = lineup;
+
   for (int bidx=0;bidx<9;++bidx){
     for (int bases=0;bases<8;++bases){
       for (int outs=0;outs<=2;++outs){
         KeyFull key{bidx,bases,outs};
         T.SW[key] = swing_transitions_full(lineup[bidx], bases, outs);
         T.BU[key] = bunt_transitions_full(lineup[bidx], bases, outs);
-        if (steal_allowed(bases, outs)){
-          const auto& runner = lineup[prev_idx(bidx)];
-          double ps = runner.SB;
-          if (ps>0.0){
-            int nb_s = set_runner(bases,1,false);
-            nb_s = set_runner(nb_s,2,true);
-            int nb_f = set_runner(bases,1,false);
-            T.ST[key] = {
-              {ps, outs, nb_s, 0},
-              {1.0-ps, min(outs+1,3), nb_f, 0}
-            };
-          } else {
-            T.ST[key] = {{1.0, outs, bases, 0}}; // disabled
-          }
-        } else {
-          T.ST[key] = {{1.0, outs, bases, 0}};
-        }
       }
     }
   }
@@ -482,7 +566,7 @@ static TransFull compile_game_transitions(const array<Player,9>& lineup){
 }
 
 static vector<State> reachable_states(const TransFull& A, const TransFull& H){
-  State start{1,0,0,0,0,0,0};
+  State start{1,0,0,0,0,0,0,-1}; // no runner on 1st at start
   deque<State> Q; Q.push_back(start);
   unordered_set<State, StateHash> seen; seen.insert(start);
 
@@ -493,31 +577,39 @@ static vector<State> reachable_states(const TransFull& A, const TransFull& H){
 
     if (s.outs >= 3){
       auto nh = next_half(s.inn, s.half);
-      State s2{nh.first, nh.second, 0, 0, s.bA, s.bH, s.rd};
+      // new half: bases empty, no runner on 1st
+      State s2{nh.first, nh.second, 0, 0, s.bA, s.bH, s.rd, -1};
       if (!seen.count(s2)){ seen.insert(s2); Q.push_back(s2); }
       continue;
     }
 
     if (s.half==0){
-      // away acts: 3 actions
+      // away acts: 3 actions (swing, bunt, steal)
       KeyFull key{s.bA, s.bases, s.outs};
       int nbA = (s.bA+1)%9;
-      vector<BranchFull> branches;
+
+      auto apply_branch = [&](const BranchFull& br){
+        if (br.p==0.0) return;
+        int nrd = clamp_diff(s.rd + br.runs);
+        auto t2 = terminal_value(s.inn, s.half, br.no, nrd);
+        int nr1;
+        if (br.r1_mode == R1_KEEP)       nr1 = s.r1;
+        else if (br.r1_mode == R1_SET_BATTER) nr1 = s.bA;
+        else                              nr1 = -1;
+
+        if (t2.first) return; // terminal → no successor state for BFS
+        State s2{s.inn, s.half, br.no, br.nb, nbA, s.bH, nrd, nr1};
+        if (!seen.count(s2)){ seen.insert(s2); Q.push_back(s2); }
+      };
+
       const auto& v0 = A.SW.at(key);
       const auto& v1 = A.BU.at(key);
-      const auto& v2 = A.ST.at(key);
-      branches.reserve(v0.size()+v1.size()+v2.size());
-      branches.insert(branches.end(), v0.begin(), v0.end());
-      branches.insert(branches.end(), v1.begin(), v1.end());
-      branches.insert(branches.end(), v2.begin(), v2.end());
-      for (const auto& br: branches){
-        if (br.p==0.0) continue;
-        int nrd = clamp_diff(s.rd + br.runs);
-        auto [term2, _] = terminal_value(s.inn, s.half, br.no, nrd);
-        if (term2) continue;
-        State s2{s.inn, s.half, br.no, br.nb, nbA, s.bH, nrd};
-        if (!seen.count(s2)){ seen.insert(s2); Q.push_back(s2); }
-      }
+      auto v2 = steal_transitions_full(A, s);
+
+      for (const auto& br: v0) apply_branch(br);
+      for (const auto& br: v1) apply_branch(br);
+      for (const auto& br: v2) apply_branch(br);
+
     } else {
       // home swings only
       KeyFull key{s.bH, s.bases, s.outs};
@@ -526,9 +618,14 @@ static vector<State> reachable_states(const TransFull& A, const TransFull& H){
       for (const auto& br: branches){
         if (br.p==0.0) continue;
         int nrd = clamp_diff(s.rd - br.runs);
-        auto [term2, _] = terminal_value(s.inn, s.half, br.no, nrd);
-        if (term2) continue;
-        State s2{s.inn, s.half, br.no, br.nb, s.bA, nbH, nrd};
+        auto t2 = terminal_value(s.inn, s.half, br.no, nrd);
+        int nr1;
+        if (br.r1_mode == R1_KEEP)       nr1 = s.r1;
+        else if (br.r1_mode == R1_SET_BATTER) nr1 = s.bH;
+        else                              nr1 = -1;
+
+        if (t2.first) continue;
+        State s2{s.inn, s.half, br.no, br.nb, s.bA, nbH, nrd, nr1};
         if (!seen.count(s2)){ seen.insert(s2); Q.push_back(s2); }
       }
     }
@@ -571,41 +668,59 @@ evaluate_winprob_fast(const vector<string>& away_names, const vector<string>& ho
         newv = tv;
       } else if (s.outs==3){
         auto nh = next_half(s.inn, s.half);
-        State s2{nh.first, nh.second, 0, 0, s.bA, s.bH, s.rd};
+        State s2{nh.first, nh.second, 0, 0, s.bA, s.bH, s.rd, -1};
         auto it = V.find(s2);
         newv = (it==V.end()) ? tv : it->second;
-      } else if (s.half==0){
-        // away max over 3 actions
+        } else if (s.half==0){
+        // away: max over 3 actions (swing, bunt, steal)
         int nbA = (s.bA+1)%9;
+
         auto q_of = [&](const vector<BranchFull>& brs){
           double q=0.0;
-          for (auto& br: brs){
+          for (const auto& br: brs){
             if (br.p==0.0) continue;
             int nrd = clamp_diff(s.rd + br.runs);
             auto t2 = terminal_value(s.inn, s.half, br.no, nrd);
+
+            int nr1;
+            if (br.r1_mode == R1_KEEP)       nr1 = s.r1;
+            else if (br.r1_mode == R1_SET_BATTER) nr1 = s.bA;
+            else                              nr1 = -1;
+
             if (t2.first) q += br.p * t2.second;
             else {
-              State s2{s.inn, s.half, br.no, br.nb, nbA, s.bH, nrd};
+              State s2{s.inn, s.half, br.no, br.nb, nbA, s.bH, nrd, nr1};
               q += br.p * V[s2];
             }
           }
           return q;
         };
-        double q0 = q_of(TA.SW.at({s.bA,s.bases,s.outs}));
-        double q1 = q_of(TA.BU.at({s.bA,s.bases,s.outs}));
-        double q2 = q_of(TA.ST.at({s.bA,s.bases,s.outs}));
+
+        KeyFull key{s.bA,s.bases,s.outs};
+        double q0 = q_of(TA.SW.at(key));
+        double q1 = q_of(TA.BU.at(key));
+        auto steal_branches = steal_transitions_full(TA, s);
+        double q2 = q_of(steal_branches);
+
         newv = max({q0,q1,q2});
       } else {
         // home swing only
         int nbH = (s.bH+1)%9;
         double q=0.0;
-        for (auto& br: TH.SW.at({s.bH,s.bases,s.outs})){
+        KeyFull key{s.bH,s.bases,s.outs};
+        for (const auto& br: TH.SW.at(key)){
           if (br.p==0.0) continue;
           int nrd = clamp_diff(s.rd - br.runs);
           auto t2 = terminal_value(s.inn, s.half, br.no, nrd);
+
+          int nr1;
+          if (br.r1_mode == R1_KEEP)       nr1 = s.r1;
+          else if (br.r1_mode == R1_SET_BATTER) nr1 = s.bH;
+          else                              nr1 = -1;
+
           if (t2.first) q += br.p * t2.second;
           else {
-            State s2{s.inn, s.half, br.no, br.nb, s.bA, nbH, nrd};
+            State s2{s.inn, s.half, br.no, br.nb, s.bA, nbH, nrd, nr1};
             q += br.p * V[s2];
           }
         }
@@ -623,8 +738,8 @@ evaluate_winprob_fast(const vector<string>& away_names, const vector<string>& ho
     if (delta < TOL_GAME) break;
   }
 
-  State start{1,0,0,0,0,0,0};
-  return {V[start], move(V)};
+  State start{1,0,0,0,0,0,0,-1};
+  return {V[start], std::move(V)};
 }
 
 // =============================================================================
@@ -654,7 +769,7 @@ static vector<Ranked> optimize_lineup_by_winprob(
 
     Ranked r; r.wp=wp; r.er=item.first; r.t=spent;
     for (int i=0;i<9;++i) r.order[i]=item.second[i];
-    ranked.push_back(move(r));
+    ranked.push_back(std::move(r));
 
     cout << fixed << setprecision(6);
     cout << "[Cand " << setw(2) << setfill('0') << rank << "] "
